@@ -1,9 +1,9 @@
 import os
-import requests
-import time
-from flask import Flask, request, jsonify
-from openai import OpenAI
+import io
 import logging
+from flask import Flask, request, jsonify, render_template_string
+from openai import OpenAI
+import pandas as pd
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +17,11 @@ client = OpenAI(
     base_url="https://api.deepseek.com"
 )
 
-# ВАШ ПРОМТ НАЧИНАЕТСЯ ЗДЕСЬ
+# Конфигурация для загрузки файлов
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Максимальный размер файла 16MB
+ALLOWED_EXTENSIONS = {'txt', 'csv', 'xlsx', 'xls'}
+
+# Ваш промт (вставьте сюда ВЕСЬ ваш большой промт с базой знаний)
 FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-консультант с 15-летним опытом работы. Ты специализируешься на внедрении управленческого учета, анализе финансовых данных из 1С, поиске узких мест в бизнес-процессах, расчете юнит-экономики и помощи в работе с банками.
 
 # ПРЕДПОСЫЛКИ И ПРИНЦИПЫ РАБОТЫ:
@@ -28,7 +32,7 @@ FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-ко�
 
 # СТРУКТУРА ОТВЕТА:
 1. КРАТКОЕ РЕЗЮМЕ - основные выводы по доступным данным
-2. ДЕТАЛЬНЫЙ АНАЛИЗ - только по направлениям с имеющимися данными
+2. ДЕТАЛЬНЫЙ АНАЛИЗ - только по направлениям с имеющимися данными  
 3. РЕКОМЕНДАЦИИ - конкретные шаги на основе доступной информации
 4. ПЛАН ДЕЙСТВИЙ - приоритетные меры на ближайший период
 5. ЧТО НУЖНО ДОПОЛНИТЕЛЬНО - список недостающих данных для более точного анализа
@@ -323,10 +327,21 @@ FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-ко�
 10. **Внедрение ежемесячного налогового мониторинга** по чек-листу.
 
 # ИНСТРУКЦИЯ ДЛЯ АНАЛИТИКА:
+
+При получении данных из 1С:
+1. Проведи анализ по ВСЕМ разделам базы знаний, где есть соответствующие данные
+2. Заменяй все placeholders ([X], [Y], [Z], [ваша отрасль] и т.д.) на реальные цифры из данных клиента
+3. Давай конкретные рекомендации с указанием точных сумм и сроков
+4. Предлагай готовый план действий на ближайший месяц
+5. Всегда сравнивай показатели с отраслевыми нормативами
+6. Указывай финансовый эффект от внедрения рекомендаций
+
+Отвечай на русском языке, используй профессиональную но понятную бизнесу терминологию. Структурируй ответ с помощью заголовков, таблиц и маркированных списков для лучшей читаемости.
+
+# ИНСТРУКЦИЯ ДЛЯ АНАЛИТИКА:
 При получении данных из 1С проводи анализ по ВСЕМ разделам базы знаний, где есть соответствующие данные. Заменяй все placeholders ([X], [Y], [Z], [ваша отрасль] и т.д.) на реальные цифры из данных клиента. Давай конкретные рекомендации с указанием точных сумм и сроков. Всегда сравнивай показатели с отраслевыми нормативами.
 
 Отвечай на русском языке, используй профессиональную но понятную бизнесу терминологию. Структурируй ответ с помощью заголовков, таблиц и маркированных списков для лучшей читаемости. Будь практичным и полезным даже при ограниченной информации."""
-# ВАШ ПРОМТ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ
 
 def analyze_financial_data(user_data):
     """Функция для анализа финансовых данных через DeepSeek API"""
@@ -345,80 +360,336 @@ def analyze_financial_data(user_data):
         logger.error(f"Ошибка при обращении к DeepSeek API: {str(e)}")
         return "❌ Произошла ошибка при анализе данных. Пожалуйста, попробуйте еще раз."
 
+def allowed_file(filename):
+    """Проверяет, что у файла допустимое расширение"""
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def read_file_data(file):
+    """Читает данные из файла в зависимости от его типа"""
+    try:
+        filename = file.filename.lower()
+        
+        if filename.endswith('.csv'):
+            # Читаем CSV файл
+            df = pd.read_csv(file)
+            return df.to_string()
+            
+        elif filename.endswith(('.xlsx', '.xls')):
+            # Читаем Excel файл
+            df = pd.read_excel(file)
+            return df.to_string()
+            
+        elif filename.endswith('.txt'):
+            # Читаем текстовый файл
+            return file.read().decode('utf-8')
+            
+        else:
+            return None
+            
+    except Exception as e:
+        logger.error(f"Ошибка при чтении файла: {str(e)}")
+        return None
+
+# HTML шаблон с формой загрузки файлов
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Финансовый аналитик</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .tab-buttons {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ddd;
+        }
+        .tab-btn {
+            padding: 12px 24px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 16px;
+            border-bottom: 3px solid transparent;
+        }
+        .tab-btn.active {
+            border-bottom: 3px solid #007bff;
+            color: #007bff;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        textarea {
+            width: 100%;
+            height: 200px;
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 16px;
+            resize: vertical;
+        }
+        .file-upload {
+            border: 2px dashed #ddd;
+            padding: 40px;
+            text-align: center;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .file-upload:hover {
+            border-color: #007bff;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            display: block;
+            margin: 20px auto;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        #result {
+            margin-top: 30px;
+            padding: 20px;
+            border-radius: 4px;
+            display: none;
+        }
+        .loading {
+            color: #856404;
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            color: #721c24;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Финансовый аналитик</h1>
+        <p>Выберите способ ввода данных для финансового анализа</p>
+        
+        <div class="tab-buttons">
+            <button class="tab-btn active" onclick="openTab('text-tab')">Текстовый ввод</button>
+            <button class="tab-btn" onclick="openTab('file-tab')">Загрузка файла</button>
+        </div>
+        
+        <!-- Вкладка текстового ввода -->
+        <div id="text-tab" class="tab-content active">
+            <p>Введите финансовые данные из 1С в поле ниже:</p>
+            <textarea id="dataInput" placeholder="Пример:
+Выручка: 5 000 000 руб
+Чистая прибыль: 450 000 руб
+Дебиторская задолженность: 1 800 000 руб
+Запасы: 1 200 000 руб
+Кредиторская задолженность: 900 000 руб"></textarea>
+            <button onclick="analyzeData('text')" id="analyzeTextBtn">Проанализировать текст</button>
+        </div>
+        
+        <!-- Вкладка загрузки файла -->
+        <div id="file-tab" class="tab-content">
+            <p>Загрузите файл с финансовыми данными (поддерживаются CSV, Excel, TXT):</p>
+            <div class="file-upload">
+                <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.txt" style="display: none;" onchange="handleFileSelect()">
+                <button onclick="document.getElementById('fileInput').click()">Выберите файл</button>
+                <p id="fileName" style="margin-top: 10px;"></p>
+            </div>
+            <button onclick="analyzeData('file')" id="analyzeFileBtn" disabled>Проанализировать файл</button>
+        </div>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        function openTab(tabName) {
+            // Скрыть все вкладки
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            // Показать выбранную вкладку
+            document.getElementById(tabName).classList.add('active');
+            
+            // Обновить активные кнопки
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+        }
+        
+        function handleFileSelect() {
+            const fileInput = document.getElementById('fileInput');
+            const fileName = document.getElementById('fileName');
+            const analyzeFileBtn = document.getElementById('analyzeFileBtn');
+            
+            if (fileInput.files.length > 0) {
+                fileName.textContent = 'Выбран файл: ' + fileInput.files[0].name;
+                analyzeFileBtn.disabled = false;
+            } else {
+                fileName.textContent = '';
+                analyzeFileBtn.disabled = true;
+            }
+        }
+        
+        function analyzeData(type) {
+            let data;
+            const resultDiv = document.getElementById('result');
+            
+            if (type === 'text') {
+                data = document.getElementById('dataInput').value;
+                button = document.getElementById('analyzeTextBtn');
+            } else {
+                const fileInput = document.getElementById('fileInput');
+                if (!fileInput.files.length) {
+                    alert('Пожалуйста, выберите файл.');
+                    return;
+                }
+                data = fileInput.files[0];
+                button = document.getElementById('analyzeFileBtn');
+            }
+            
+            if (type === 'text' && !data.trim()) {
+                alert('Пожалуйста, введите данные для анализа.');
+                return;
+            }
+            
+            // Блокируем кнопку и показываем загрузку
+            button.disabled = true;
+            const originalText = button.textContent;
+            button.textContent = 'Анализируем...';
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'loading';
+            resultDiv.innerHTML = '🔄 Идет анализ ваших данных. Пожалуйста, подождите...';
+            
+            const formData = new FormData();
+            formData.append('data_type', type);
+            
+            if (type === 'text') {
+                formData.append('financial_data', data);
+            } else {
+                formData.append('file', data);
+            }
+            
+            // Отправляем запрос на сервер
+            fetch('/analyze', {
+                method: 'POST',
+                body: formData,
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    resultDiv.className = 'success';
+                    resultDiv.innerHTML = '<h3>Результат анализа:</h3><pre style="white-space: pre-wrap;">' + data.analysis + '</pre>';
+                } else {
+                    throw new Error(data.error || 'Неизвестная ошибка');
+                }
+            })
+            .catch(error => {
+                resultDiv.className = 'error';
+                resultDiv.innerHTML = '<h3>Ошибка:</h3><p>Не удалось выполнить анализ. Проверьте подключение к интернету и попробуйте снова.</p><p><small>Техническая информация: ' + error.message + '</small></p>';
+            })
+            .finally(() => {
+                // Разблокируем кнопку
+                button.disabled = false;
+                button.textContent = originalText;
+            });
+        }
+    </script>
+</body>
+</html>
+'''
+
 @app.route('/')
 def home():
-    return "🤖 Финансовый аналитик работает! Используйте Telegram-бота для общения."
+    """Главная страница с интерфейсом загрузки файлов"""
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    """Проверка работоспособности сервера"""
     return jsonify({"status": "active", "service": "financial-analyst-bot"})
 
 @app.route('/analyze', methods=['POST'])
 def analyze_endpoint():
+    """Конечная точка для анализа финансовых данных"""
     try:
-        data = request.get_json()
-        if not data or 'financial_data' not in data:
-            return jsonify({"error": "Отсутствуют финансовые данные"}), 400
-
-        financial_data = data['financial_data']
-        analysis_result = analyze_financial_data(financial_data)
-
+        data_type = request.form.get('data_type')
+        
+        if data_type == 'text':
+            # Анализ текстовых данных
+            financial_data = request.form.get('financial_data', '')
+            if not financial_data.strip():
+                return jsonify({"error": "Отсутствуют финансовые данные"}), 400
+            
+            analysis_result = analyze_financial_data(financial_data)
+            
+        elif data_type == 'file':
+            # Анализ данных из файла
+            if 'file' not in request.files:
+                return jsonify({"error": "Файл не был загружен"}), 400
+            
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({"error": "Файл не выбран"}), 400
+            
+            if file and allowed_file(file.filename):
+                # Читаем данные из файла
+                file_data = read_file_data(file)
+                if file_data is None:
+                    return jsonify({"error": "Не удалось прочитать файл. Проверьте формат файла."}), 400
+                
+                # Анализируем данные из файла
+                analysis_result = analyze_financial_data(f"Данные из файла {file.filename}:\n{file_data}")
+            else:
+                return jsonify({"error": f"Недопустимый тип файла. Разрешены: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
+        else:
+            return jsonify({"error": "Неверный тип данных"}), 400
+        
         return jsonify({
             "status": "success",
             "analysis": analysis_result
         })
+        
     except Exception as e:
         logger.error(f"Ошибка в analyze_endpoint: {str(e)}")
         return jsonify({"error": "Внутренняя ошибка сервера"}), 500
-
-# Telegram часть
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-
-@app.route('/telegram-webhook', methods=['POST'])
-def telegram_webhook():
-    try:
-        update = request.get_json()
-        if 'message' in update:
-            chat_id = update['message']['chat']['id']
-            message_text = update['message'].get('text', '')
-
-            if message_text.startswith('/start'):
-                send_telegram_message(chat_id, "🤖 Добро пожаловать! Я ваш финансовый аналитик. Пришлите мне данные из 1С для анализа (выручка, прибыль, дебиторка и т.д.).")
-
-            elif message_text.startswith('/analyze') or any(word in message_text.lower() for word in ['выручка', 'прибыль', 'дебиторк', 'запас', 'финанс']):
-                send_telegram_message(chat_id, "🔄 Анализирую ваши данные...")
-                analysis_result = analyze_financial_data(message_text)
-                send_telegram_message(chat_id, analysis_result)
-            else:
-                send_telegram_message(chat_id, "Отправьте мне финансовые данные для анализа. Например: 'Выручка 5 млн, прибыль 500 тыс., дебиторка 1.5 млн'")
-
-        return jsonify({"status": "success"})
-    except Exception as e:
-        logger.error(f"Ошибка в telegram_webhook: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-def send_telegram_message(chat_id, text):
-    if not TELEGRAM_TOKEN:
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    max_length = 4000
-
-    if len(text) > max_length:
-        parts = [text[i:i+max_length] for i in range(0, len(text), max_length)]
-        for part in parts:
-            payload = {"chat_id": chat_id, "text": part, "parse_mode": "HTML"}
-            try:
-                requests.post(url, json=payload)
-                time.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Ошибка отправки в Telegram: {str(e)}")
-    else:
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-        try:
-            requests.post(url, json=payload)
-        except Exception as e:
-            logger.error(f"Ошибка отправки в Telegram: {str(e)}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
