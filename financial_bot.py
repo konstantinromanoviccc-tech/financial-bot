@@ -11,10 +11,10 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Инициализация клиента DeepSeek
+# Инициализация клиента для OpenRouter
 client = OpenAI(
-    api_key=os.getenv('DEEPSEEK_API_KEY'),
-    base_url="https://api.deepseek.com"
+    api_key=os.getenv('OPENROUTER_API_KEY'),  # Используем новый ключ
+    base_url="https://openrouter.ai/api/v1"  # Указываем адрес API OpenRouter
 )
 
 # Конфигурация для загрузки файлов
@@ -344,20 +344,24 @@ FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-ко�
 Отвечай на русском языке, используй профессиональную но понятную бизнесу терминологию. Структурируй ответ с помощью заголовков, таблиц и маркированных списков для лучшей читаемости. Будь практичным и полезным даже при ограниченной информации."""
 
 def analyze_financial_data(user_data):
-    """Функция для анализа финансовых данных через DeepSeek API"""
+    """Функция для анализа финансовых данных через OpenRouter API"""
     try:
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek/deepseek-chat",  # Указываем провайдера и модель
             messages=[
                 {"role": "system", "content": FINANCIAL_ANALYST_PROMPT},
                 {"role": "user", "content": user_data}
             ],
             stream=False,
-            temperature=0.1
+            temperature=0.1,
+            extra_headers={
+                "HTTP-Referer": "https://financial-bot-euho.onrender.com",  # URL вашего сервиса
+                "X-Title": "Financial Analyst Bot",  # Название вашего приложения
+            }
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"Ошибка при обращении к DeepSeek API: {str(e)}")
+        logger.error(f"Ошибка при обращении к OpenRouter API: {str(e)}")
         return "❌ Произошла ошибка при анализе данных. Пожалуйста, попробуйте еще раз."
 
 def allowed_file(filename):
@@ -391,7 +395,7 @@ def read_file_data(file):
         logger.error(f"Ошибка при чтении файла: {str(e)}")
         return None
 
-# HTML шаблон с формой загрузки файлов
+# HTML шаблон с формой загрузки файлов (остается без изменений)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="ru">
