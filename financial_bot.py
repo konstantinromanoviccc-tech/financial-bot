@@ -3,6 +3,7 @@ import io
 import logging
 import requests
 import time
+import threading
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import pandas as pd
@@ -24,7 +25,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'txt', 'csv', 'xlsx', 'xls'}
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-# Ваш промт (вставьте ВЕСЬ ваш промт сюда)
+# Ваш промт (ОБЯЗАТЕЛЬНО вставьте ваш полный промт вместо текста ниже)
 FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-консультант с 15-летним опытом работы. Ты специализируешься на внедрении управленческого учета, анализе финансовых данных из 1С, поиске узких мест в бизнес-процессах, расчете юнит-экономики и помощи в работе с банками.
 
 # ПРЕДПОСЫЛКИ И ПРИНЦИПЫ РАБОТЫ:
@@ -392,7 +393,7 @@ def send_telegram_message(chat_id, text):
     """Отправка сообщения в Telegram"""
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN не установлен")
-        return
+        return False
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
@@ -407,10 +408,14 @@ def send_telegram_message(chat_id, text):
                 "parse_mode": "HTML"
             }
             try:
-                requests.post(url, json=payload)
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code != 200:
+                    logger.error(f"Ошибка отправки в Telegram: {response.text}")
                 time.sleep(0.5)
             except Exception as e:
                 logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+                return False
+        return True
     else:
         payload = {
             "chat_id": chat_id,
@@ -418,9 +423,39 @@ def send_telegram_message(chat_id, text):
             "parse_mode": "HTML"
         }
         try:
-            requests.post(url, json=payload)
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"Ошибка отправки в Telegram: {response.text}")
+                return False
         except Exception as e:
             logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+            return False
+
+def handle_telegram_message(chat_id, message_text):
+    """Обработка сообщения от Telegram в отдельном потоке"""
+    try:
+        if message_text.startswith('/start'):
+            send_telegram_message(chat_id, "🤖 Добро пожаловать! Я ваш финансовый аналитик. Пришлите мне финансовые данные из 1С для анализа (выручка, прибыль, дебиторка и т.д.)")
+        
+        elif message_text.startswith('/help'):
+            send_telegram_message(chat_id, "📊 Отправьте мне финансовые данные для анализа. Например:\n\n• Выручка: 5 000 000 руб\n• Чистая прибыль: 450 000 руб\n• Дебиторская задолженность: 1 800 000 руб\n• Запасы: 1 200 000 руб\n\nИли используйте команду /analyze")
+            
+        elif message_text.startswith('/analyze') or any(word in message_text.lower() for word in ['выручка', 'прибыль', 'дебиторк', 'запас', 'финанс', 'отчет', 'баланс', 'актив', 'пассив']):
+            send_telegram_message(chat_id, "🔄 Анализирую ваши финансовые данные... Это займет несколько секунд.")
+            analysis_result = analyze_financial_data(message_text)
+            if analysis_result:
+                send_telegram_message(chat_id, analysis_result)
+            else:
+                send_telegram_message(chat_id, "❌ Не удалось проанализировать данные. Попробуйте еще раз.")
+                
+        else:
+            send_telegram_message(chat_id, "🤔 Я не совсем понял запрос. Отправьте мне финансовые данные для анализа или используйте команды:\n/start - начать работу\n/help - помощь\n/analyze - анализ данных")
+            
+    except Exception as e:
+        logger.error(f"Ошибка в handle_telegram_message: {str(e)}")
+        send_telegram_message(chat_id, "❌ Произошла ошибка при обработке запроса. Попробуйте еще раз.")
 
 # HTML шаблон для веб-интерфейса
 HTML_TEMPLATE = '''
@@ -730,27 +765,25 @@ def telegram_webhook():
     """Webhook для Telegram бота"""
     try:
         update = request.get_json()
+        logger.info(f"Получен запрос от Telegram: {update}")
         
-        if 'message' in update:
+        if 'message' in update and 'text' in update['message']:
             chat_id = update['message']['chat']['id']
             message_text = update['message'].get('text', '')
             
-            if message_text.startswith('/start'):
-                send_telegram_message(chat_id, "🤖 Добро пожаловать! Я ваш финансовый аналитик. Пришлите мне финансовые данные из 1С для анализа (выручка, прибыль, дебиторка и т.д.)")
-            
-            elif message_text.startswith('/analyze') or any(word in message_text.lower() for word in ['выручка', 'прибыль', 'дебиторк', 'запас', 'финанс', 'отчет']):
-                send_telegram_message(chat_id, "🔄 Анализирую ваши финансовые данные...")
-                analysis_result = analyze_financial_data(message_text)
-                send_telegram_message(chat_id, analysis_result)
-                
-            else:
-                send_telegram_message(chat_id, "Отправьте мне финансовые данные для анализа. Например: 'Выручка 5 млн, прибыль 500 тыс., дебиторка 1.5 млн' или используйте команду /analyze")
+            # Запускаем обработку в отдельном потоке чтобы избежать таймаута
+            thread = threading.Thread(
+                target=handle_telegram_message,
+                args=(chat_id, message_text)
+            )
+            thread.daemon = True
+            thread.start()
                 
         return jsonify({"status": "success"})
         
     except Exception as e:
         logger.error(f"Ошибка в telegram_webhook: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "success"})  # Всегда возвращаем success
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
