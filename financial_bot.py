@@ -5,6 +5,7 @@ import requests
 import time
 import threading
 import tempfile
+import json
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import pandas as pd
@@ -26,7 +27,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'txt', 'csv', 'xlsx', 'xls'}
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-# Ваш промт (ВСТАВЬТЕ ВАШ ПОЛНЫЙ ПРОМТ ЗДЕСЬ)
+# ВАШ ПРОМТ - ВСТАВЬТЕ СЮДА ВЕСЬ ВАШ ПРОМТ МЕЖДУ ТРОЙНЫМИ КАВЫЧКАМИ
 FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-консультант с 15-летним опытом работы. Ты специализируешься на внедрении управленческого учета, анализе финансовых данных из 1С, поиске узких мест в бизнес-процессах, расчете юнит-экономики и помощи в работе с банками.
 
 # ПРЕДПОСЫЛКИ И ПРИНЦИПЫ РАБОТЫ:
@@ -184,7 +185,7 @@ FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-ко�
 
 #### **1. ОХВАТ (Трафик) -- Решение: Где искать клиентов**
 
-**Анализ в 1С:** Отчет **«Анализ доходов и расходов по статьям ДДС»** (Раздел «Отчеты» -> «Отчеты по денежным средствам»). Фильтруем по статьям «Маркетинг» и «Реклама», группируем по подразделениям (каналам).
+**Анализ в 1С:** Отчет **«Анализ доходи и расходов по статьям ДДС»** (Раздел «Отчеты» -> «Отчеты по денежным средствам»). Фильтруем по статьям «Маркетинг» и «Реклама», группируем по подразделениям (каналам).
 
 **✅ КОНКРЕТНЫЕ РЕШЕНИЯ ДЛЯ ОХВАТА (на основе 1С):**
 1. **Скачать из 1С отчет «Оборотно-сальдовая ведомость по счету 44.01 "Издержки обращения"»**. Проанализировать, по каким статьям маркетинга самые высокие расходы при низкой отдаче. Перераспределить бюджет.
@@ -320,7 +321,7 @@ FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-ко�
 
 **Для налога на прибыль:**
 4. **Внедрение правил документооборота** для всех хозяйственных операций.
-5. **Настройка в 1С предупредительных сообщений** о нормируемых расходах.
+5. **Настройка в 1С предупредительных сообщений** о нормируемых расходам.
 6. **Регулярный анализ постоянных и временных разниц** (ПБУ 18/02).
 
 **Для зарплаты и взносов:**
@@ -390,47 +391,32 @@ def read_file_data(file):
         logger.error(f"Ошибка при чтении файла: {str(e)}")
         return None
 
-def send_telegram_message(chat_id, text):
-    """Отправка сообщения в Telegram БЕЗ HTML разметки"""
+def send_telegram_message(chat_id, text, reply_markup=None):
+    """Отправка сообщения в Telegram с поддержкой клавиатуры"""
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN не установлен")
         return False
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    # Разбиваем длинные сообщения на части
-    max_length = 4000
-    if len(text) > max_length:
-        parts = [text[i:i+max_length] for i in range(0, len(text), max_length)]
-        for part in parts:
-            payload = {
-                "chat_id": chat_id,
-                "text": part
-            }
-            try:
-                response = requests.post(url, json=payload, timeout=10)
-                if response.status_code != 200:
-                    logger.error(f"Ошибка отправки в Telegram: {response.text}")
-                time.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Ошибка отправки в Telegram: {str(e)}")
-                return False
-        return True
-    else:
-        payload = {
-            "chat_id": chat_id,
-            "text": text
-        }
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            if response.status_code == 200:
-                return True
-            else:
-                logger.error(f"Ошибка отправки в Telegram: {response.text}")
-                return False
-        except Exception as e:
-            logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(f"Ошибка отправки в Telegram: {response.text}")
             return False
+    except Exception as e:
+        logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+        return False
 
 def download_telegram_file(file_id):
     """Скачивание файла из Telegram"""
@@ -454,37 +440,114 @@ def download_telegram_file(file_id):
         logger.error(f"Ошибка скачивания файла: {str(e)}")
         return None
 
+def create_main_keyboard():
+    """Создает основную клавиатуру меню"""
+    keyboard = {
+        "keyboard": [
+            [
+                {"text": "📊 Быстрый анализ"},
+                {"text": "💼 Финансовый цикл"}
+            ],
+            [
+                {"text": "💰 Ликвидность"},
+                {"text": "📈 Юнит-экономика"}
+            ],
+            [
+                {"text": "💸 Денежные потоки"},
+                {"text": "🏦 Банковские показатели"}
+            ],
+            [
+                {"text": "📋 Пример данных"},
+                {"text": "🆘 Помощь"}
+            ]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+    return json.dumps(keyboard)
+
 def handle_telegram_message(chat_id, message_data):
     """Обработка сообщения от Telegram в отдельном потоке"""
     try:
         message_text = message_data.get('text', '')
         document = message_data.get('document')
         
-        # Обработка команд
-        if message_text.startswith('/start'):
-            welcome_msg = """🤖 Добро пожаловать в Финансовый аналитик!
+        # Обработка команд и текстовых сообщений
+        if message_text.startswith('/start') or message_text == '🔙 Главное меню':
+            welcome_msg = """🤖 *ФИНАНСОВЫЙ АНАЛИТИК PRO*
 
-Я могу анализировать:
-• 📊 Текстовые финансовые данные
-• 📁 Файлы Excel/CSV
-• 💬 Любые финансовые вопросы
+*Ваш эксперт по:* 
+• 📊 Внедрению управленческого учета
+• 🔍 Анализу данных 1С 
+• 💰 Поиску узких мест в бизнес-процессах
+• 📈 Расчету юнит-экономики
+• 🏦 Работе с банками
 
-Просто отправьте мне данные для анализа!"""
-            send_telegram_message(chat_id, welcome_msg)
+*Выберите тип анализа:*"""
+            send_telegram_message(chat_id, welcome_msg, create_main_keyboard())
         
-        elif message_text.startswith('/help'):
-            help_msg = """📋 Доступные команды:
+        elif message_text.startswith('/help') or message_text == '🆘 Помощь':
+            help_msg = """*📋 КАК РАБОТАТЬ С БОТОМ:*
 
-/start - начать работу
-/help - помощь
-/analyze - анализ данных
+*1. 📊 Быстрый анализ* - полный анализ по всем разделам
+*2. 💼 Финансовый цикл* - анализ дебиторки, запасов, кредиторки
+*3. 💰 Ликвидность* - оценка платежеспособности бизнеса  
+*4. 📈 Юнит-экономика* - анализ эффективности бизнес-модели
+*5. 💸 Денежные потоки* - управление денежными средствами
+*6. 🏦 Банковские показатели* - подготовка к кредитованию
 
-Что я могу анализировать:
-• Выручка, прибыль, расходы
-• Балансы и отчеты
-• Финансовые файлы (Excel, CSV)
-• Любые финансовые вопросы"""
-            send_telegram_message(chat_id, help_msg)
+*📎 Поддерживаемые форматы:*
+• Excel файлы (.xlsx, .xls)
+• CSV файлы (.csv)
+• Текстовые данные
+
+*💡 Просто отправьте файл или текст с финансовыми данными!*"""
+            send_telegram_message(chat_id, help_msg, create_main_keyboard())
+        
+        elif message_text == '📋 Пример данных':
+            example_msg = """*📊 ПРИМЕР ДАННЫХ ДЛЯ АНАЛИЗА:*
+
+*Основные показатели:*
+Выручка: 5 000 000 руб
+Чистая прибыль: 450 000 руб
+Дебиторская задолженность: 1 800 000 руб
+Запасы: 1 200 000 руб
+Кредиторская задолженность: 900 000 руб
+Денежные средства: 300 000 руб
+
+*Финансовый цикл:*
+Оборачиваемость дебиторки: 45 дней
+Оборачиваемость запасов: 60 дней
+Оборачиваемость кредиторки: 30 дней
+
+*Или отправьте Excel/CSV файл с аналогичными данными*"""
+            send_telegram_message(chat_id, example_msg, create_main_keyboard())
+        
+        elif message_text in ['📊 Быстрый анализ', '💼 Финансовый цикл', '💰 Ликвидность', 
+                            '📈 Юнит-экономика', '💸 Денежные потоки', '🏦 Банковские показатели']:
+            
+            analysis_types = {
+                '📊 Быстрый анализ': 'полный анализ по всем разделам',
+                '💼 Финансовый цикл': 'анализ дебиторской задолженности, запасов и кредиторки',
+                '💰 Ликвидность': 'оценка платежеспособности и оборотного капитала', 
+                '📈 Юнит-экономика': 'анализ эффективности бизнес-модели',
+                '💸 Денежные потоки': 'управление денежными средствами',
+                '🏦 Банковские показатели': 'подготовка к кредитованию и оценка банками'
+            }
+            
+            selected_analysis = analysis_types[message_text]
+            prompt_msg = f"""*🔍 ВЫБРАН: {message_text}*
+
+*Что будет проанализировано:*
+{selected_analysis}
+
+*📎 Отправьте:*
+• Финансовые данные текстом
+• Или файл (Excel/CSV) с данными 1С
+
+*💡 Можно отправить даже неполные данные - я сделаю максимум возможного!*"""
+            
+            send_telegram_message(chat_id, prompt_msg, create_main_keyboard())
         
         # Обработка документов (Excel, CSV файлы)
         elif document:
@@ -493,10 +556,12 @@ def handle_telegram_message(chat_id, message_data):
             
             # Проверяем разрешенные форматы
             if not any(file_name.lower().endswith(ext) for ext in ['.xlsx', '.xls', '.csv', '.txt']):
-                send_telegram_message(chat_id, f"❌ Формат файла {file_name} не поддерживается. Отправьте Excel, CSV или TXT файл.")
+                send_telegram_message(chat_id, 
+                    f"❌ *Формат файла {file_name} не поддерживается.*\n\nОтправьте Excel, CSV или TXT файл с финансовыми данными.", 
+                    create_main_keyboard())
                 return
                 
-            send_telegram_message(chat_id, f"📥 Получил файл: {file_name}. Обрабатываю...")
+            send_telegram_message(chat_id, f"📥 *Получил файл: {file_name}*\n\n🔄 *Обрабатываю данные...*")
             
             file_content = download_telegram_file(file_id)
             if file_content:
@@ -519,16 +584,42 @@ def handle_telegram_message(chat_id, message_data):
                             file_data = f.read()
                     
                     analysis_text = f"Данные из файла {file_name}:\n{file_data}"
-                    if message_text:
-                        analysis_text += f"\n\nКомментарий пользователя: {message_text}"
                     
-                    send_telegram_message(chat_id, "🔄 Анализирую данные из файла...")
+                    send_telegram_message(chat_id, "🔍 *Провожу глубокий анализ...*\n\n*Это займет 1-2 минуты* ⏳")
+                    
+                    # Добавляем контекст в зависимости от последнего выбранного типа анализа
+                    if hasattr(handle_telegram_message, 'last_analysis_type'):
+                        analysis_text = f"{handle_telegram_message.last_analysis_type}\n\n{analysis_text}"
+                    
                     analysis_result = analyze_financial_data(analysis_text)
-                    send_telegram_message(chat_id, analysis_result)
+                    
+                    # Разбиваем результат на части если слишком длинный
+                    if len(analysis_result) > 4000:
+                        parts = [analysis_result[i:i+4000] for i in range(0, len(analysis_result), 4000)]
+                        for i, part in enumerate(parts):
+                            if i == 0:
+                                send_telegram_message(chat_id, f"*📊 РЕЗУЛЬТАТ АНАЛИЗА (часть {i+1}/{len(parts)}):*\n\n{part}")
+                            else:
+                                send_telegram_message(chat_id, part)
+                            time.sleep(0.5)
+                    else:
+                        send_telegram_message(chat_id, f"*📊 РЕЗУЛЬТАТ АНАЛИЗА:*\n\n{analysis_result}")
+                    
+                    # Предлагаем дополнительные действия
+                    follow_up_msg = """*🎯 ЧТО ДАЛЬШЕ?*
+
+• Выберите другой тип анализа
+• Загрузите обновленные данные  
+• Получите консультацию по внедрению рекомендаций
+
+*Или просто напишите ваш вопрос!*"""
+                    send_telegram_message(chat_id, follow_up_msg, create_main_keyboard())
                     
                 except Exception as e:
                     logger.error(f"Ошибка обработки файла: {str(e)}")
-                    send_telegram_message(chat_id, f"❌ Ошибка при обработке файла. Убедитесь, что файл не поврежден и имеет правильный формат.")
+                    send_telegram_message(chat_id, 
+                        "❌ *Ошибка при обработке файла.*\n\nУбедитесь, что файл не поврежден и содержит финансовые данные в правильном формате.", 
+                        create_main_keyboard())
                 finally:
                     # Удаляем временный файл
                     try:
@@ -536,24 +627,68 @@ def handle_telegram_message(chat_id, message_data):
                     except:
                         pass
             else:
-                send_telegram_message(chat_id, "❌ Не удалось загрузить файл. Попробуйте еще раз.")
+                send_telegram_message(chat_id, 
+                    "❌ *Не удалось загрузить файл.*\n\nПопробуйте отправить его еще раз или введите данные текстом.", 
+                    create_main_keyboard())
         
-        # Обработка текстовых сообщений
-        elif message_text:
-            send_telegram_message(chat_id, "🔄 Анализирую ваш запрос...")
-            analysis_result = analyze_financial_data(message_text)
-            if analysis_result:
-                send_telegram_message(chat_id, analysis_result)
+        # Обработка текстовых сообщений (финансовые данные)
+        elif message_text and message_text not in ['📁 Загрузить файл', '📝 Ввести текст', '🔙 Назад']:
+            
+            # Сохраняем тип анализа для контекста
+            if message_text in ['📊 Быстрый анализ', '💼 Финансовый цикл', '💰 Ликвидность', 
+                              '📈 Юнит-экономика', '💸 Денежные потоки', '🏦 Банковские показатели']:
+                handle_telegram_message.last_analysis_type = f"Тип анализа: {message_text}"
+                send_telegram_message(chat_id, 
+                    "📝 *Отлично! Теперь отправьте финансовые данные текстом.*", 
+                    create_main_keyboard())
             else:
-                send_telegram_message(chat_id, "❌ Не удалось проанализировать запрос. Попробуйте еще раз.")
+                # Это финансовые данные для анализа
+                send_telegram_message(chat_id, "🔍 *Анализирую ваши данные...*\n\n*Это займет 1-2 минуты* ⏳")
+                
+                analysis_text = message_text
+                if hasattr(handle_telegram_message, 'last_analysis_type'):
+                    analysis_text = f"{handle_telegram_message.last_analysis_type}\n\n{analysis_text}"
+                
+                analysis_result = analyze_financial_data(analysis_text)
+                
+                # Разбиваем результат на части если слишком длинный
+                if len(analysis_result) > 4000:
+                    parts = [analysis_result[i:i+4000] for i in range(0, len(analysis_result), 4000)]
+                    for i, part in enumerate(parts):
+                        if i == 0:
+                            send_telegram_message(chat_id, f"*📊 РЕЗУЛЬТАТ АНАЛИЗА (часть {i+1}/{len(parts)}):*\n\n{part}")
+                        else:
+                            send_telegram_message(chat_id, part)
+                        time.sleep(0.5)
+                else:
+                    send_telegram_message(chat_id, f"*📊 РЕЗУЛЬТАТ АНАЛИЗА:*\n\n{analysis_result}")
+                
+                # Сбрасываем тип анализа
+                if hasattr(handle_telegram_message, 'last_analysis_type'):
+                    delattr(handle_telegram_message, 'last_analysis_type')
+                
+                # Предлагаем дополнительные действия
+                follow_up_msg = """*✅ АНАЛИЗ ЗАВЕРШЕН*
+
+*Что дальше?*
+• Выберите другой тип анализа
+• Загрузите обновленные данные
+• Получите детальные рекомендации
+
+*Я готов помочь с внедрением управленческого учета!*"""
+                send_telegram_message(chat_id, follow_up_msg, create_main_keyboard())
         
         # Если нет ни текста, ни файла
         else:
-            send_telegram_message(chat_id, "🤔 Не понял ваш запрос. Отправьте текст или файл (Excel/CSV) для анализа.")
+            send_telegram_message(chat_id, 
+                "🤔 *Не понял запрос.*\n\nВыберите тип анализа из меню или отправьте финансовые данные текстом/файлом.", 
+                create_main_keyboard())
             
     except Exception as e:
         logger.error(f"Ошибка в handle_telegram_message: {str(e)}")
-        send_telegram_message(chat_id, "❌ Произошла ошибка при обработке запроса. Попробуйте еще раз.")
+        send_telegram_message(chat_id, 
+            "❌ *Произошла ошибка при обработке запроса.*\n\nПопробуйте еще раз или выберите другой тип анализа.", 
+            create_main_keyboard())
 
 # HTML шаблон для веб-интерфейса
 HTML_TEMPLATE = '''
@@ -562,7 +697,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Финансовый аналитик</title>
+    <title>Финансовый аналитик PRO</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -676,8 +811,8 @@ HTML_TEMPLATE = '''
 </head>
 <body>
     <div class="container">
-        <h1>🤖 Финансовый аналитик</h1>
-        <p>Выберите способ ввода данных для финансового анализа</p>
+        <h1>🤖 Финансовый аналитик PRO</h1>
+        <p>Профессиональный анализ финансовых данных и управленческого учета</p>
         
         <div class="tab-buttons">
             <button class="tab-btn active" onclick="openTab('text-tab')">Текстовый ввод</button>
@@ -686,19 +821,32 @@ HTML_TEMPLATE = '''
         
         <!-- Вкладка текстового ввода -->
         <div id="text-tab" class="tab-content active">
-            <p>Введите финансовые данные из 1С в поле ниже:</p>
-            <textarea id="dataInput" placeholder="Пример:
+            <p>Введите финансовые данные из 1С для комплексного анализа:</p>
+            <textarea id="dataInput" placeholder="Пример комплексных данных:
+ВЫРУЧКА И ПРИБЫЛЬ:
 Выручка: 5 000 000 руб
 Чистая прибыль: 450 000 руб
+
+ОБОРОТНЫЕ АКТИВЫ:
 Дебиторская задолженность: 1 800 000 руб
 Запасы: 1 200 000 руб
-Кредиторская задолженность: 900 000 руб"></textarea>
-            <button onclick="analyzeData('text')" id="analyzeTextBtn">Проанализировать текст</button>
+Денежные средства: 300 000 руб
+
+КРАТКОСРОЧНЫЕ ОБЯЗАТЕЛЬСТВА:
+Кредиторская задолженность: 900 000 руб
+Краткосрочные кредиты: 500 000 руб
+
+ДОПОЛНИТЕЛЬНО:
+Оборачиваемость дебиторки: 45 дней
+Оборачиваемость запасов: 60 дней
+Количество клиентов: 120
+Средний чек: 41 667 руб"></textarea>
+            <button onclick="analyzeData('text')" id="analyzeTextBtn">Проанализировать данные</button>
         </div>
         
         <!-- Вкладка загрузки файла -->
         <div id="file-tab" class="tab-content">
-            <p>Загрузите файл с финансовыми данными (поддерживаются CSV, Excel, TXT):</p>
+            <p>Загрузите файл с финансовыми данными (Excel, CSV):</p>
             <div class="file-upload">
                 <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.txt" style="display: none;" onchange="handleFileSelect()">
                 <button onclick="document.getElementById('fileInput').click()">Выберите файл</button>
@@ -708,9 +856,8 @@ HTML_TEMPLATE = '''
         </div>
         
         <div class="telegram-info">
-            <strong>📱 Также доступно в Telegram!</strong><br>
-            Наш бот умеет анализировать:<br>
-            • Текстовые запросы • Excel/CSV файлы
+            <strong>📱 PRO-версия в Telegram!</strong><br>
+            Расширенный анализ • Структурированные отчеты • Рекомендации по внедрению
         </div>
         
         <div id="result"></div>
