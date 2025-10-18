@@ -4,9 +4,12 @@ import logging
 import requests
 import time
 import threading
+import base64
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import pandas as pd
+from PIL import Image
+import tempfile
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -22,10 +25,10 @@ client = OpenAI(
 
 # Конфигурация
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-ALLOWED_EXTENSIONS = {'txt', 'csv', 'xlsx', 'xls'}
+ALLOWED_EXTENSIONS = {'txt', 'csv', 'xlsx', 'xls', 'pdf'}
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-# Ваш промт (ОБЯЗАТЕЛЬНО вставьте ваш полный промт вместо текста ниже)
+# Ваш промт (ВСТАВЬТЕ ВАШ ПОЛНЫЙ ПРОМТ ЗДЕСЬ)
 FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-консультант с 15-летним опытом работы. Ты специализируешься на внедрении управленческого учета, анализе финансовых данных из 1С, поиске узких мест в бизнес-процессах, расчете юнит-экономики и помощи в работе с банками.
 
 # ПРЕДПОСЫЛКИ И ПРИНЦИПЫ РАБОТЫ:
@@ -390,7 +393,7 @@ def read_file_data(file):
         return None
 
 def send_telegram_message(chat_id, text):
-    """Отправка сообщения в Telegram"""
+    """Отправка сообщения в Telegram БЕЗ HTML разметки"""
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN не установлен")
         return False
@@ -404,8 +407,8 @@ def send_telegram_message(chat_id, text):
         for part in parts:
             payload = {
                 "chat_id": chat_id,
-                "text": part,
-                "parse_mode": "HTML"
+                "text": part
+                # НЕТ parse_mode - отправляем как обычный текст
             }
             try:
                 response = requests.post(url, json=payload, timeout=10)
@@ -419,8 +422,8 @@ def send_telegram_message(chat_id, text):
     else:
         payload = {
             "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
+            "text": text
+            # НЕТ parse_mode - отправляем как обычный текст
         }
         try:
             response = requests.post(url, json=payload, timeout=10)
@@ -433,25 +436,187 @@ def send_telegram_message(chat_id, text):
             logger.error(f"Ошибка отправки в Telegram: {str(e)}")
             return False
 
-def handle_telegram_message(chat_id, message_text):
+def download_telegram_file(file_id):
+    """Скачивание файла из Telegram"""
+    try:
+        # Получаем информацию о файле
+        file_info_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
+        file_info_response = requests.post(file_info_url, json={"file_id": file_id})
+        file_info = file_info_response.json()
+        
+        if not file_info.get('ok'):
+            return None
+            
+        file_path = file_info['result']['file_path']
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        
+        # Скачиваем файл
+        file_response = requests.get(file_url)
+        return file_response.content
+        
+    except Exception as e:
+        logger.error(f"Ошибка скачивания файла: {str(e)}")
+        return None
+
+def process_image(image_content):
+    """Обработка изображения - конвертация в текст через OpenRouter Vision"""
+    try:
+        # Кодируем изображение в base64
+        image_base64 = base64.b64encode(image_content).decode('utf-8')
+        
+        response = client.chat.completions.create(
+            model="openai/gpt-4o",  # Модель с поддержкой vision
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Пожалуйста, прочитайте и проанализируйте это финансовое изображение. Извлеките все числовые данные, текст и таблицы. Если это график - опишите его. Верните структурированные данные в текстовом формате."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=2000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Ошибка обработки изображения: {str(e)}")
+        return f"Не удалось обработать изображение: {str(e)}"
+
+def handle_telegram_message(chat_id, message_data):
     """Обработка сообщения от Telegram в отдельном потоке"""
     try:
+        message_text = message_data.get('text', '')
+        document = message_data.get('document')
+        photo = message_data.get('photo')
+        
+        # Обработка команд
         if message_text.startswith('/start'):
-            send_telegram_message(chat_id, "🤖 Добро пожаловать! Я ваш финансовый аналитик. Пришлите мне финансовые данные из 1С для анализа (выручка, прибыль, дебиторка и т.д.)")
+            welcome_msg = """🤖 Добро пожаловать в Финансовый аналитик!
+
+Я могу анализировать:
+• 📊 Текстовые финансовые данные
+• 📁 Файлы Excel/CSV
+• 🖼️ Фотографии финансовых отчетов
+• 💬 Любые финансовые вопросы
+
+Просто отправьте мне данные для анализа!"""
+            send_telegram_message(chat_id, welcome_msg)
         
         elif message_text.startswith('/help'):
-            send_telegram_message(chat_id, "📊 Отправьте мне финансовые данные для анализа. Например:\n\n• Выручка: 5 000 000 руб\n• Чистая прибыль: 450 000 руб\n• Дебиторская задолженность: 1 800 000 руб\n• Запасы: 1 200 000 руб\n\nИли используйте команду /analyze")
+            help_msg = """📋 Доступные команды:
+
+/start - начать работу
+/help - помощь
+/analyze - анализ данных
+
+Что я могу анализировать:
+• Выручка, прибыль, расходы
+• Балансы и отчеты
+• Финансовые файлы (Excel, CSV)
+• Фотографии отчетов
+• Любые финансовые вопросы"""
+            send_telegram_message(chat_id, help_msg)
+        
+        # Обработка документов (Excel, CSV файлы)
+        elif document:
+            file_id = document['file_id']
+            file_name = document.get('file_name', 'файл')
             
-        elif message_text.startswith('/analyze') or any(word in message_text.lower() for word in ['выручка', 'прибыль', 'дебиторк', 'запас', 'финанс', 'отчет', 'баланс', 'актив', 'пассив']):
-            send_telegram_message(chat_id, "🔄 Анализирую ваши финансовые данные... Это займет несколько секунд.")
-            analysis_result = analyze_financial_data(message_text)
-            if analysis_result:
-                send_telegram_message(chat_id, analysis_result)
-            else:
-                send_telegram_message(chat_id, "❌ Не удалось проанализировать данные. Попробуйте еще раз.")
+            send_telegram_message(chat_id, f"📥 Получил файл: {file_name}. Обрабатываю...")
+            
+            file_content = download_telegram_file(file_id)
+            if file_content:
+                # Создаем временный файл для обработки
+                with tempfile.NamedTemporaryFile(delete=False, suffix=file_name) as temp_file:
+                    temp_file.write(file_content)
+                    temp_file_path = temp_file.name
                 
+                try:
+                    # Обрабатываем файл в зависимости от типа
+                    if file_name.lower().endswith(('.xlsx', '.xls')):
+                        df = pd.read_excel(temp_file_path)
+                        file_data = df.to_string()
+                    elif file_name.lower().endswith('.csv'):
+                        df = pd.read_csv(temp_file_path)
+                        file_data = df.to_string()
+                    else:
+                        # Для других файлов пробуем прочитать как текст
+                        with open(temp_file_path, 'r', encoding='utf-8') as f:
+                            file_data = f.read()
+                    
+                    analysis_text = f"Данные из файла {file_name}:\n{file_data}"
+                    if message_text:
+                        analysis_text += f"\n\nКомментарий пользователя: {message_text}"
+                    
+                    send_telegram_message(chat_id, "🔄 Анализирую данные из файла...")
+                    analysis_result = analyze_financial_data(analysis_text)
+                    send_telegram_message(chat_id, analysis_result)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка обработки файла: {str(e)}")
+                    send_telegram_message(chat_id, f"❌ Ошибка при обработке файла: {str(e)}")
+                finally:
+                    # Удаляем временный файл
+                    os.unlink(temp_file_path)
+            else:
+                send_telegram_message(chat_id, "❌ Не удалось загрузить файл. Попробуйте еще раз.")
+        
+        # Обработка фотографий
+        elif photo:
+            # Берем последнее (самое качественное) фото
+            photo_data = photo[-1]
+            file_id = photo_data['file_id']
+            
+            send_telegram_message(chat_id, "🖼️ Получил изображение. Анализирую...")
+            
+            image_content = download_telegram_file(file_id)
+            if image_content:
+                try:
+                    # Анализируем изображение
+                    image_analysis = process_image(image_content)
+                    analysis_text = f"Данные из изображения:\n{image_analysis}"
+                    if message_text:
+                        analysis_text += f"\n\nКомментарий пользователя: {message_text}"
+                    
+                    send_telegram_message(chat_id, "🔄 Анализирую распознанные данные...")
+                    analysis_result = analyze_financial_data(analysis_text)
+                    send_telegram_message(chat_id, analysis_result)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка анализа изображения: {str(e)}")
+                    send_telegram_message(chat_id, f"❌ Ошибка при анализе изображения: {str(e)}")
+            else:
+                send_telegram_message(chat_id, "❌ Не удалось загрузить изображение. Попробуйте еще раз.")
+        
+        # Обработка текстовых сообщений
+        elif message_text:
+            if message_text.startswith('/analyze') or any(word in message_text.lower() for word in ['выручка', 'прибыль', 'дебиторк', 'запас', 'финанс', 'отчет', 'баланс', 'актив', 'пассив', 'кредит', 'заем', 'инвест']):
+                send_telegram_message(chat_id, "🔄 Анализирую ваши данные... Это займет несколько секунд.")
+                analysis_result = analyze_financial_data(message_text)
+                if analysis_result:
+                    send_telegram_message(chat_id, analysis_result)
+                else:
+                    send_telegram_message(chat_id, "❌ Не удалось проанализировать данные. Попробуйте еще раз.")
+            else:
+                # Анализируем любой текст, даже если он не содержит финансовых ключевых слов
+                send_telegram_message(chat_id, "🔄 Анализирую ваш запрос...")
+                analysis_result = analyze_financial_data(message_text)
+                if analysis_result:
+                    send_telegram_message(chat_id, analysis_result)
+                else:
+                    send_telegram_message(chat_id, "❌ Не удалось проанализировать запрос. Попробуйте еще раз.")
+        
+        # Если нет ни текста, ни файла, ни фото
         else:
-            send_telegram_message(chat_id, "🤔 Я не совсем понял запрос. Отправьте мне финансовые данные для анализа или используйте команды:\n/start - начать работу\n/help - помощь\n/analyze - анализ данных")
+            send_telegram_message(chat_id, "🤔 Не понял ваш запрос. Отправьте текст, файл или фото для анализа.")
             
     except Exception as e:
         logger.error(f"Ошибка в handle_telegram_message: {str(e)}")
@@ -611,7 +776,8 @@ HTML_TEMPLATE = '''
         
         <div class="telegram-info">
             <strong>📱 Также доступно в Telegram!</strong><br>
-            Напишите нашему боту для анализа данных прямо в мессенджере
+            Наш бот умеет анализировать:<br>
+            • Текстовые запросы • Excel/CSV файлы • Фотографии отчетов
         </div>
         
         <div id="result"></div>
@@ -767,14 +933,18 @@ def telegram_webhook():
         update = request.get_json()
         logger.info(f"Получен запрос от Telegram: {update}")
         
-        if 'message' in update and 'text' in update['message']:
+        if 'message' in update:
             chat_id = update['message']['chat']['id']
-            message_text = update['message'].get('text', '')
+            message_data = {
+                'text': update['message'].get('text', ''),
+                'document': update['message'].get('document'),
+                'photo': update['message'].get('photo')
+            }
             
             # Запускаем обработку в отдельном потоке чтобы избежать таймаута
             thread = threading.Thread(
                 target=handle_telegram_message,
-                args=(chat_id, message_text)
+                args=(chat_id, message_data)
             )
             thread.daemon = True
             thread.start()
