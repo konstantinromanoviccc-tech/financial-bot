@@ -1,6 +1,8 @@
 import os
 import io
 import logging
+import requests
+import time
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import pandas as pd
@@ -13,15 +15,16 @@ app = Flask(__name__)
 
 # Инициализация клиента для OpenRouter
 client = OpenAI(
-    api_key=os.getenv('OPENROUTER_API_KEY'),  # Используем новый ключ
-    base_url="https://openrouter.ai/api/v1"  # Указываем адрес API OpenRouter
+    api_key=os.getenv('OPENROUTER_API_KEY'),
+    base_url="https://openrouter.ai/api/v1"
 )
 
-# Конфигурация для загрузки файлов
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Максимальный размер файла 16MB
+# Конфигурация
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'txt', 'csv', 'xlsx', 'xls'}
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-# Ваш промт (вставьте сюда ВЕСЬ ваш большой промт с базой знаний)
+# Ваш промт (вставьте ВЕСЬ ваш промт сюда)
 FINANCIAL_ANALYST_PROMPT = """Ты - финансовый аналитик-консультант с 15-летним опытом работы. Ты специализируешься на внедрении управленческого учета, анализе финансовых данных из 1С, поиске узких мест в бизнес-процессах, расчете юнит-экономики и помощи в работе с банками.
 
 # ПРЕДПОСЫЛКИ И ПРИНЦИПЫ РАБОТЫ:
@@ -347,7 +350,7 @@ def analyze_financial_data(user_data):
     """Функция для анализа финансовых данных через OpenRouter API"""
     try:
         response = client.chat.completions.create(
-            model="deepseek/deepseek-chat",  # Указываем провайдера и модель
+            model="deepseek/deepseek-chat",
             messages=[
                 {"role": "system", "content": FINANCIAL_ANALYST_PROMPT},
                 {"role": "user", "content": user_data}
@@ -355,8 +358,8 @@ def analyze_financial_data(user_data):
             stream=False,
             temperature=0.1,
             extra_headers={
-                "HTTP-Referer": "https://financial-bot-euho.onrender.com",  # URL вашего сервиса
-                "X-Title": "Financial Analyst Bot",  # Название вашего приложения
+                "HTTP-Referer": "https://financial-bot-euho.onrender.com",
+                "X-Title": "Financial Analyst Bot",
             }
         )
         return response.choices[0].message.content
@@ -365,37 +368,61 @@ def analyze_financial_data(user_data):
         return "❌ Произошла ошибка при анализе данных. Пожалуйста, попробуйте еще раз."
 
 def allowed_file(filename):
-    """Проверяет, что у файла допустимое расширение"""
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def read_file_data(file):
-    """Читает данные из файла в зависимости от его типа"""
     try:
         filename = file.filename.lower()
         
         if filename.endswith('.csv'):
-            # Читаем CSV файл
             df = pd.read_csv(file)
             return df.to_string()
-            
         elif filename.endswith(('.xlsx', '.xls')):
-            # Читаем Excel файл
             df = pd.read_excel(file)
             return df.to_string()
-            
         elif filename.endswith('.txt'):
-            # Читаем текстовый файл
             return file.read().decode('utf-8')
-            
         else:
             return None
-            
     except Exception as e:
         logger.error(f"Ошибка при чтении файла: {str(e)}")
         return None
 
-# HTML шаблон с формой загрузки файлов (остается без изменений)
+def send_telegram_message(chat_id, text):
+    """Отправка сообщения в Telegram"""
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN не установлен")
+        return
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # Разбиваем длинные сообщения на части
+    max_length = 4000
+    if len(text) > max_length:
+        parts = [text[i:i+max_length] for i in range(0, len(text), max_length)]
+        for part in parts:
+            payload = {
+                "chat_id": chat_id,
+                "text": part,
+                "parse_mode": "HTML"
+            }
+            try:
+                requests.post(url, json=payload)
+                time.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+    else:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        try:
+            requests.post(url, json=payload)
+        except Exception as e:
+            logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+
+# HTML шаблон для веб-интерфейса
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="ru">
@@ -504,6 +531,14 @@ HTML_TEMPLATE = '''
             background-color: #f8d7da;
             border: 1px solid #f5c6cb;
         }
+        .telegram-info {
+            background-color: #0088cc;
+            color: white;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 20px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -539,19 +574,21 @@ HTML_TEMPLATE = '''
             <button onclick="analyzeData('file')" id="analyzeFileBtn" disabled>Проанализировать файл</button>
         </div>
         
+        <div class="telegram-info">
+            <strong>📱 Также доступно в Telegram!</strong><br>
+            Напишите нашему боту для анализа данных прямо в мессенджере
+        </div>
+        
         <div id="result"></div>
     </div>
 
     <script>
         function openTab(tabName) {
-            // Скрыть все вкладки
             document.querySelectorAll('.tab-content').forEach(tab => {
                 tab.classList.remove('active');
             });
-            // Показать выбранную вкладку
             document.getElementById(tabName).classList.add('active');
             
-            // Обновить активные кнопки
             document.querySelectorAll('.tab-btn').forEach(btn => {
                 btn.classList.remove('active');
             });
@@ -594,7 +631,6 @@ HTML_TEMPLATE = '''
                 return;
             }
             
-            // Блокируем кнопку и показываем загрузку
             button.disabled = true;
             const originalText = button.textContent;
             button.textContent = 'Анализируем...';
@@ -611,7 +647,6 @@ HTML_TEMPLATE = '''
                 formData.append('file', data);
             }
             
-            // Отправляем запрос на сервер
             fetch('/analyze', {
                 method: 'POST',
                 body: formData,
@@ -630,7 +665,6 @@ HTML_TEMPLATE = '''
                 resultDiv.innerHTML = '<h3>Ошибка:</h3><p>Не удалось выполнить анализ. Проверьте подключение к интернету и попробуйте снова.</p><p><small>Техническая информация: ' + error.message + '</small></p>';
             })
             .finally(() => {
-                // Разблокируем кнопку
                 button.disabled = false;
                 button.textContent = originalText;
             });
@@ -647,7 +681,6 @@ def home():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Проверка работоспособности сервера"""
     return jsonify({"status": "active", "service": "financial-analyst-bot"})
 
 @app.route('/analyze', methods=['POST'])
@@ -657,7 +690,6 @@ def analyze_endpoint():
         data_type = request.form.get('data_type')
         
         if data_type == 'text':
-            # Анализ текстовых данных
             financial_data = request.form.get('financial_data', '')
             if not financial_data.strip():
                 return jsonify({"error": "Отсутствуют финансовые данные"}), 400
@@ -665,7 +697,6 @@ def analyze_endpoint():
             analysis_result = analyze_financial_data(financial_data)
             
         elif data_type == 'file':
-            # Анализ данных из файла
             if 'file' not in request.files:
                 return jsonify({"error": "Файл не был загружен"}), 400
             
@@ -674,12 +705,10 @@ def analyze_endpoint():
                 return jsonify({"error": "Файл не выбран"}), 400
             
             if file and allowed_file(file.filename):
-                # Читаем данные из файла
                 file_data = read_file_data(file)
                 if file_data is None:
                     return jsonify({"error": "Не удалось прочитать файл. Проверьте формат файла."}), 400
                 
-                # Анализируем данные из файла
                 analysis_result = analyze_financial_data(f"Данные из файла {file.filename}:\n{file_data}")
             else:
                 return jsonify({"error": f"Недопустимый тип файла. Разрешены: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
@@ -694,6 +723,34 @@ def analyze_endpoint():
     except Exception as e:
         logger.error(f"Ошибка в analyze_endpoint: {str(e)}")
         return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+
+# Telegram вебхук
+@app.route('/telegram-webhook', methods=['POST'])
+def telegram_webhook():
+    """Webhook для Telegram бота"""
+    try:
+        update = request.get_json()
+        
+        if 'message' in update:
+            chat_id = update['message']['chat']['id']
+            message_text = update['message'].get('text', '')
+            
+            if message_text.startswith('/start'):
+                send_telegram_message(chat_id, "🤖 Добро пожаловать! Я ваш финансовый аналитик. Пришлите мне финансовые данные из 1С для анализа (выручка, прибыль, дебиторка и т.д.)")
+            
+            elif message_text.startswith('/analyze') or any(word in message_text.lower() for word in ['выручка', 'прибыль', 'дебиторк', 'запас', 'финанс', 'отчет']):
+                send_telegram_message(chat_id, "🔄 Анализирую ваши финансовые данные...")
+                analysis_result = analyze_financial_data(message_text)
+                send_telegram_message(chat_id, analysis_result)
+                
+            else:
+                send_telegram_message(chat_id, "Отправьте мне финансовые данные для анализа. Например: 'Выручка 5 млн, прибыль 500 тыс., дебиторка 1.5 млн' или используйте команду /analyze")
+                
+        return jsonify({"status": "success"})
+        
+    except Exception as e:
+        logger.error(f"Ошибка в telegram_webhook: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
